@@ -26,18 +26,6 @@ data "aws_subnet" "public_a" {
   }
 }
 
-data "aws_subnet" "private_a" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.main.id]
-  }
-
-  filter {
-    name   = "cidr-block"
-    values = [var.private_subnet_a_cidr]
-  }
-}
-
 data "aws_subnet" "public_b" {
   filter {
     name   = "vpc-id"
@@ -47,18 +35,6 @@ data "aws_subnet" "public_b" {
   filter {
     name   = "cidr-block"
     values = [var.public_subnet_b_cidr]
-  }
-}
-
-data "aws_subnet" "private_b" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.main.id]
-  }
-
-  filter {
-    name   = "cidr-block"
-    values = [var.private_subnet_b_cidr]
   }
 }
 
@@ -141,29 +117,38 @@ resource "aws_launch_template" "app" {
   }
 
   user_data = base64encode(<<-EOF
-    #!/bin/bash
-    set -euxo pipefail
+#!/bin/bash
+set -euxo pipefail
 
-    dnf install -y httpd jq curl
+dnf install -y httpd jq curl
 
-    cat > /etc/httpd/conf.d/no-keepalive.conf <<CONF
-    KeepAlive Off
-    MaxKeepAliveRequests 1
+cat > /etc/httpd/conf.d/no-keepalive.conf <<CONF
+KeepAlive Off
+MaxKeepAliveRequests 1
 CONF
 
-    TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-    INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-    PRIVATE_IP=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+PRIVATE_IP=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
 
-    cat > /var/www/html/index.html <<HTML
-Instance ID: $INSTANCE_ID
-Private IP: $PRIVATE_IP
+cat > /var/www/html/index.html <<HTML
+<!doctype html>
+<html>
+  <head>
+    <title>Terraform Load Balanced Application</title>
+  </head>
+  <body>
+    <h1>Hello from Terraform</h1>
+    <p>Instance ID: $INSTANCE_ID</p>
+    <p>Private IP: $PRIVATE_IP</p>
+  </body>
+</html>
 HTML
 
-    systemctl enable --now httpd
+systemctl enable --now httpd
 
-    nohup dnf update -y >/var/log/background-dnf-update.log 2>&1 &
-  EOF
+nohup dnf update -y >/var/log/background-dnf-update.log 2>&1 &
+EOF
   )
 
   tag_specifications {
@@ -238,7 +223,7 @@ resource "aws_autoscaling_group" "app" {
   force_delete              = true
   health_check_type         = "ELB"
   health_check_grace_period = 30
-  wait_for_capacity_timeout = "5m"
+  wait_for_capacity_timeout = "7m"
   vpc_zone_identifier       = [data.aws_subnet.public_a.id, data.aws_subnet.public_b.id]
 
   launch_template {
@@ -272,5 +257,13 @@ resource "aws_autoscaling_attachment" "app" {
 
   depends_on = [
     aws_lb_listener.http
+  ]
+}
+
+resource "time_sleep" "wait_for_targets" {
+  create_duration = "90s"
+
+  depends_on = [
+    aws_autoscaling_attachment.app
   ]
 }
