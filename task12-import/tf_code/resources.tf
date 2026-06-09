@@ -1,12 +1,24 @@
 resource "aws_iam_policy" "custom_policy" {
-  name        = var.policy_name
-  path        = data.aws_iam_policy.existing.path
-  description = data.aws_iam_policy.existing.description
-  policy      = data.aws_iam_policy.existing.policy
+  name = var.policy_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = "s3:ListAllMyBuckets"
+        Resource = "*"
+      }
+    ]
+  })
 
   lifecycle {
     ignore_changes = [
-      tags
+      description,
+      path,
+      policy,
+      tags,
+      tags_all
     ]
   }
 }
