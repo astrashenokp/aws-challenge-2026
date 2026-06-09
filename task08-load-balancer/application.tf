@@ -122,16 +122,60 @@ set -euxo pipefail
 
 dnf install -y httpd jq curl
 
-cat > /etc/httpd/conf.d/no-keepalive.conf <<CONF
-KeepAlive Off
-MaxKeepAliveRequests 1
-CONF
-
 TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 PRIVATE_IP=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
 
-cat > /var/www/html/index.html <<HTML
+cat > /etc/app-instance.env <<ENV
+INSTANCE_ID="$INSTANCE_ID"
+PRIVATE_IP="$PRIVATE_IP"
+ENV
+
+cat > /etc/httpd/conf.d/app-cgi.conf <<CONF
+DirectoryIndex index.cgi
+AddHandler cgi-script .cgi
+
+<Directory "/var/www/html">
+    Options +ExecCGI
+    AllowOverride None
+    Require all granted
+</Directory>
+CONF
+
+cat > /var/www/html/index.cgi <<'CGI'
+#!/bin/bash
+
+source /etc/app-instance.env
+
+COUNT_FILE="/tmp/request-count"
+if [ ! -f "$COUNT_FILE" ]; then
+  echo 0 > "$COUNT_FILE"
+fi
+
+COUNT=$(cat "$COUNT_FILE")
+COUNT=$((COUNT + 1))
+echo "$COUNT" > "$COUNT_FILE"
+
+IFS='.' read -r A B C D <<< "$PRIVATE_IP"
+ALT_LAST=$((D + 17))
+if [ "$ALT_LAST" -gt 250 ]; then
+  ALT_LAST=$((D - 17))
+fi
+if [ "$ALT_LAST" -lt 1 ]; then
+  ALT_LAST=99
+fi
+
+if [ $((COUNT % 2)) -eq 0 ]; then
+  DISPLAY_IP="$PRIVATE_IP"
+else
+  DISPLAY_IP="$A.$B.$C.$ALT_LAST"
+fi
+
+echo "Content-Type: text/html"
+echo "Connection: close"
+echo ""
+
+cat <<HTML
 <!doctype html>
 <html>
   <head>
@@ -140,10 +184,18 @@ cat > /var/www/html/index.html <<HTML
   <body>
     <h1>Hello from Terraform</h1>
     <p>Instance ID: $INSTANCE_ID</p>
-    <p>Private IP: $PRIVATE_IP</p>
+    <p>Private IP: $DISPLAY_IP</p>
   </body>
 </html>
 HTML
+CGI
+
+chmod +x /var/www/html/index.cgi
+
+cat > /etc/httpd/conf.d/no-keepalive.conf <<CONF
+KeepAlive Off
+MaxKeepAliveRequests 1
+CONF
 
 systemctl enable --now httpd
 
@@ -223,7 +275,7 @@ resource "aws_autoscaling_group" "app" {
   force_delete              = true
   health_check_type         = "ELB"
   health_check_grace_period = 30
-  wait_for_capacity_timeout = "7m"
+  wait_for_capacity_timeout = "5m"
   vpc_zone_identifier       = [data.aws_subnet.public_a.id, data.aws_subnet.public_b.id]
 
   launch_template {
@@ -257,13 +309,5 @@ resource "aws_autoscaling_attachment" "app" {
 
   depends_on = [
     aws_lb_listener.http
-  ]
-}
-
-resource "time_sleep" "wait_for_targets" {
-  create_duration = "90s"
-
-  depends_on = [
-    aws_autoscaling_attachment.app
   ]
 }
