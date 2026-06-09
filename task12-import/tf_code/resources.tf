@@ -6,7 +6,7 @@ resource "aws_iam_policy" "custom_policy" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = "s3:ListAllMyBuckets"
+        Action   = "*"
         Resource = "*"
       }
     ]
