@@ -50,22 +50,50 @@ set -euxo pipefail
 
 dnf install -y httpd curl
 
-TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-PRIVATE_IP=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+cat > /var/www/html/health.html <<HTML
+OK
+HTML
 
-cat > /var/www/html/index.html <<HTML
+cat > /var/www/html/index.cgi <<'CGI'
+#!/bin/bash
+echo "Content-Type: text/html"
+echo ""
+
+TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
+INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id || echo "unknown")
+PRIVATE_IP=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4 || echo "unknown")
+REQUEST_UUID=$(cat /proc/sys/kernel/random/uuid)
+
+cat <<HTML
 <!doctype html>
 <html>
   <body>
     <h1>Hello from Terraform module application</h1>
+    <p>UUID: $REQUEST_UUID</p>
     <p>Instance ID: $INSTANCE_ID</p>
     <p>Private IP: $PRIVATE_IP</p>
+    <p>Launch template: ${var.aws_launch_template_name}</p>
+    <p>Instance type: t3.micro</p>
+    <p>Network interface setting: delete_on_termination = true</p>
   </body>
 </html>
 HTML
+CGI
+
+chmod +x /var/www/html/index.cgi
+
+cat > /etc/httpd/conf.d/app.conf <<'CONF'
+<Directory "/var/www/html">
+    Options +ExecCGI
+    AddHandler cgi-script .cgi
+    DirectoryIndex index.cgi
+    AllowOverride None
+    Require all granted
+</Directory>
+CONF
 
 systemctl enable --now httpd
+systemctl restart httpd
 EOF
   )
 
@@ -89,21 +117,22 @@ resource "aws_lb" "app" {
   security_groups    = [var.public_http_security_group_id]
   subnets            = var.public_subnet_ids
 
+  idle_timeout = 5
+
   tags = local.common_tags
 }
 
 resource "aws_lb_target_group" "app" {
-  name                          = local.target_group_name
-  port                          = 80
-  protocol                      = "HTTP"
-  vpc_id                        = var.vpc_id
-  target_type                   = "instance"
-  deregistration_delay          = 5
-  load_balancing_algorithm_type = "round_robin"
+  name                 = local.target_group_name
+  port                 = 80
+  protocol             = "HTTP"
+  vpc_id               = var.vpc_id
+  target_type          = "instance"
+  deregistration_delay = 5
 
   health_check {
     enabled             = true
-    path                = "/"
+    path                = "/health.html"
     protocol            = "HTTP"
     matcher             = "200"
     interval            = 5
@@ -135,7 +164,7 @@ resource "aws_autoscaling_group" "app" {
   max_size                  = 2
   force_delete              = true
   health_check_type         = "ELB"
-  health_check_grace_period = 30
+  health_check_grace_period = 20
   wait_for_capacity_timeout = "5m"
   vpc_zone_identifier       = var.public_subnet_ids
 
