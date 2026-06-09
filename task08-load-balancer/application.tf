@@ -129,9 +129,10 @@ resource "aws_launch_template" "app" {
   }
 
   network_interfaces {
-    device_index          = 0
-    delete_on_termination = true
-    security_groups       = [data.aws_security_group.ssh.id, data.aws_security_group.http.id]
+    device_index                = 0
+    delete_on_termination       = true
+    associate_public_ip_address = true
+    security_groups             = [data.aws_security_group.ssh.id, data.aws_security_group.http.id]
   }
 
   metadata_options {
@@ -234,7 +235,7 @@ resource "aws_autoscaling_group" "app" {
   desired_capacity    = 2
   min_size            = 1
   max_size            = 2
-  vpc_zone_identifier = [data.aws_subnet.private_a.id, data.aws_subnet.private_b.id]
+  vpc_zone_identifier = [data.aws_subnet.public_a.id, data.aws_subnet.public_b.id]
 
   launch_template {
     id      = aws_launch_template.app.id
@@ -265,3 +266,5 @@ resource "aws_autoscaling_attachment" "app" {
   autoscaling_group_name = aws_autoscaling_group.app.name
   lb_target_group_arn    = aws_lb_target_group.app.arn
 }
+
+
