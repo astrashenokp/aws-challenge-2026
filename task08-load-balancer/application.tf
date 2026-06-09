@@ -142,35 +142,27 @@ resource "aws_launch_template" "app" {
 
   user_data = base64encode(<<-EOF
     #!/bin/bash
-    set -e
+    set -euxo pipefail
 
-    dnf update -y
     dnf install -y httpd jq curl
 
-    systemctl enable httpd
-    systemctl start httpd
+    cat > /etc/httpd/conf.d/no-keepalive.conf <<CONF
+    KeepAlive Off
+    MaxKeepAliveRequests 1
+CONF
 
-    TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-
-    INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-
-    PRIVATE_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+    TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+    INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+    PRIVATE_IP=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
 
     cat > /var/www/html/index.html <<HTML
-    <!doctype html>
-    <html>
-      <head>
-        <title>Terraform Load Balanced Application</title>
-      </head>
-      <body>
-        <h1>Hello from Terraform</h1>
-        <p>Instance ID: $INSTANCE_ID</p>
-        <p>Private IP: $PRIVATE_IP</p>
-      </body>
-    </html>
+Instance ID: $INSTANCE_ID
+Private IP: $PRIVATE_IP
 HTML
 
-    systemctl restart httpd
+    systemctl enable --now httpd
+
+    nohup dnf update -y >/var/log/background-dnf-update.log 2>&1 &
   EOF
   )
 
@@ -198,20 +190,28 @@ resource "aws_lb" "app" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name     = local.target_group_name
-  port     = 80
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.main.id
+  name                          = local.target_group_name
+  port                          = 80
+  protocol                      = "HTTP"
+  vpc_id                        = data.aws_vpc.main.id
+  target_type                   = "instance"
+  deregistration_delay          = 5
+  load_balancing_algorithm_type = "round_robin"
 
   health_check {
     enabled             = true
     path                = "/"
     protocol            = "HTTP"
     matcher             = "200"
-    interval            = 30
-    timeout             = 5
+    interval            = 5
+    timeout             = 2
     healthy_threshold   = 2
     unhealthy_threshold = 2
+  }
+
+  stickiness {
+    type    = "lb_cookie"
+    enabled = false
   }
 
   tags = local.common_tags
@@ -231,11 +231,15 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_autoscaling_group" "app" {
-  name                = var.aws_asg_name
-  desired_capacity    = 2
-  min_size            = 1
-  max_size            = 2
-  vpc_zone_identifier = [data.aws_subnet.public_a.id, data.aws_subnet.public_b.id]
+  name                      = var.aws_asg_name
+  desired_capacity          = 2
+  min_size                  = 1
+  max_size                  = 2
+  force_delete              = true
+  health_check_type         = "ELB"
+  health_check_grace_period = 30
+  wait_for_capacity_timeout = "5m"
+  vpc_zone_identifier       = [data.aws_subnet.public_a.id, data.aws_subnet.public_b.id]
 
   launch_template {
     id      = aws_launch_template.app.id
@@ -265,6 +269,8 @@ resource "aws_autoscaling_group" "app" {
 resource "aws_autoscaling_attachment" "app" {
   autoscaling_group_name = aws_autoscaling_group.app.name
   lb_target_group_arn    = aws_lb_target_group.app.arn
+
+  depends_on = [
+    aws_lb_listener.http
+  ]
 }
-
-
